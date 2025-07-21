@@ -508,10 +508,10 @@ app.put('/bookings/:id', authenticateToken, async (req, res) => {
     console.log('Received body:', req.body);
     const userId = req.user.UserID;
     const bookingId = req.params.id;
-    const { roomId, slotId, date, reason, department } = req.body;
+    const { roomId, slotId, date, reason } = req.body;
 
-    if (!roomId || !slotId || !date || !reason || !department) {
-      return res.status(400).json({ error: 'roomId, slotId, date, reason, and department are required' });
+    if (!roomId || !slotId || !date || !reason) {
+      return res.status(400).json({ error: 'roomId, slotId, date, reason,  are required' });
     }
 
     // Validate roomId (integer or room name)
@@ -563,7 +563,7 @@ app.put('/bookings/:id', authenticateToken, async (req, res) => {
     // Update booking
     const [result] = await pool.query(
       'UPDATE Bookings SET RoomID = ?, SlotID = ?, BookingDate = ?, Reason = ?, Department = ?, Status = ? WHERE BookingID = ? AND UserID = ?',
-      [parsedRoomId, parsedSlotId, date, reason, department, 'Confirmed', bookingId, userId]
+      [parsedRoomId, parsedSlotId, date, reason, 'development', 'Confirmed', bookingId, userId]
     );
 
     if (result.affectedRows === 0) {
