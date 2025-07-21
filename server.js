@@ -285,7 +285,7 @@ app.post('/bookings', authenticateToken, async (req, res) => {
   try {
     console.log('Received body:', req.body);
     const userId = req.user.UserID;
-    const { roomId, slotId, date, reason, department } = req.body;
+    const { roomId, slotId, date, reason } = req.body;
     if (!roomId || !slotId || !date || !reason ) {
       return res.status(400).json({ error: 'roomId, slotId, date, reason, and department are required' });
     }
@@ -306,7 +306,7 @@ app.post('/bookings', authenticateToken, async (req, res) => {
     // Create booking
     await pool.query(
       'INSERT INTO Bookings (UserID, RoomID, SlotID, BookingDate, Reason, Status, Department) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [userId, roomId, slotId, date, reason, 'Confirmed', null]
+      [userId, roomId, slotId, date, reason, 'Confirmed', 'development']
     );
     // Create notification
     const message = `${user[0].FullName} booked ${room[0].Name} for ${slot[0].Display} on ${date}.`;
