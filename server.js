@@ -257,6 +257,7 @@ app.get('/rooms', async (req, res) => {
   }
 });
 
+
 app.get('/slots', async (req, res) => {
   try {
     const { date, roomId } = req.query;
@@ -285,7 +286,7 @@ app.post('/bookings', authenticateToken, async (req, res) => {
     console.log('Received body:', req.body);
     const userId = req.user.UserID;
     const { roomId, slotId, date, reason, department } = req.body;
-    if (!roomId || !slotId || !date || !reason || !department) {
+    if (!roomId || !slotId || !date || !reason ) {
       return res.status(400).json({ error: 'roomId, slotId, date, reason, and department are required' });
     }
     const [existing] = await pool.query(
@@ -305,7 +306,7 @@ app.post('/bookings', authenticateToken, async (req, res) => {
     // Create booking
     await pool.query(
       'INSERT INTO Bookings (UserID, RoomID, SlotID, BookingDate, Reason, Status, Department) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [userId, roomId, slotId, date, reason, 'Confirmed', department]
+      [userId, roomId, slotId, date, reason, 'Confirmed', null]
     );
     // Create notification
     const message = `${user[0].FullName} booked ${room[0].Name} for ${slot[0].Display} on ${date}.`;
@@ -320,6 +321,49 @@ app.post('/bookings', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+
+app.post('/bookingsuser', authenticateToken, async (req, res) => {
+  try {
+    console.log('Received body:', req.body);
+    const userId = req.user.UserID;
+    const { roomId, slotId, date, reason } = req.body;
+    if (!roomId || !slotId || !date || !reason) {
+      return res.status(400).json({ error: 'roomId, slotId, date, and reason are required' });
+    }
+    const [existing] = await pool.query(
+      'SELECT BookingID FROM Bookings WHERE RoomID = ? AND SlotID = ? AND BookingDate = ? AND Status != "Cancelled"',
+      [roomId, slotId, date]
+    );
+    if (existing.length > 0) {
+      return res.status(409).json({ error: 'This slot is already booked' });
+    }
+    // Verify room, slot, and user exist
+    const [room] = await pool.query('SELECT Name FROM Rooms WHERE RoomID = ?', [roomId]);
+    const [slot] = await pool.query('SELECT Display FROM TimeSlots WHERE SlotID = ?', [slotId]);
+    const [user] = await pool.query('SELECT FullName, Department FROM Users WHERE UserID = ?', [userId]);
+    if (!room.length || !slot.length || !user.length) {
+      return res.status(404).json({ error: 'Room, slot, or user not found' });
+    }
+    // Use user[0].Department for department, or set as null if you don't want to save
+    await pool.query(
+      'INSERT INTO Bookings (UserID, RoomID, SlotID, BookingDate, Reason, Status, Department) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [userId, roomId, slotId, date, reason, 'Confirmed', user[0].Department ?? null]
+    );
+    // Create notification
+    const message = `${user[0].FullName} booked ${room[0].Name} for ${slot[0].Display} on ${date}.`;
+    await createNotification(userId, null, 'BOOKING_CREATED', message);
+    res.status(201).json({ message: 'Booking created successfully' });
+  } catch (err) {
+    console.error('Booking error:', err);
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'This slot is already booked' });
+    }
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
 
 app.get('/bookings', authenticateToken, async (req, res) => {
   try {
@@ -421,8 +465,6 @@ app.delete('/bookings/:id', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-
-
 
 
 app.put('/bookings/:id', authenticateToken, async (req, res) => {
