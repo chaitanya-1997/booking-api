@@ -365,6 +365,38 @@ app.post('/bookingsuser', authenticateToken, async (req, res) => {
 
 
 
+// app.get('/bookings', authenticateToken, async (req, res) => {
+//   try {
+//     const userId = req.user.UserID;
+//     const [rows] = await pool.query(
+//       `SELECT 
+//          b.BookingID AS id, 
+//          u.FullName AS name,
+//          COALESCE(r.Name, 'Unknown Room') AS room, 
+//          b.BookingDate AS date, 
+//          t.Display AS time, 
+//          b.Reason AS reason, 
+//          b.Status AS status, 
+//          b.Department AS department, 
+//          r.Products AS products
+//        FROM Bookings b
+//        JOIN Rooms r ON b.RoomID = r.RoomID
+//        JOIN TimeSlots t ON b.SlotID = t.SlotID
+//        JOIN Users u ON b.UserID = u.UserID
+//        WHERE b.UserID = ? AND b.Status != 'Cancelled'`,
+//       [userId]
+//     );
+//     const bookings = rows.map(row => ({
+//       ...row,
+//       products: row.products ? row.products.split(',') : [],
+//     }));
+//     res.json(bookings);
+//   } catch (err) {
+//     console.error('Bookings error:', err);
+//     res.status(500).json({ error: 'Server error' });
+//   }
+// });
+
 app.get('/bookings', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.UserID;
@@ -383,7 +415,9 @@ app.get('/bookings', authenticateToken, async (req, res) => {
        JOIN Rooms r ON b.RoomID = r.RoomID
        JOIN TimeSlots t ON b.SlotID = t.SlotID
        JOIN Users u ON b.UserID = u.UserID
-       WHERE b.UserID = ? AND b.Status != 'Cancelled'`,
+       WHERE b.UserID = ?
+       ORDER BY b.BookingDate DESC, t.StartTime ASC
+      `,
       [userId]
     );
     const bookings = rows.map(row => ({
@@ -396,6 +430,8 @@ app.get('/bookings', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+
 
 app.get('/admin/bookings', authenticateToken, async (req, res) => {
   try {
