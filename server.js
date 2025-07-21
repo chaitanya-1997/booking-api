@@ -6,12 +6,31 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const cron = require('node-cron');
+const multer = require('multer');
+const path = require('path');
 
 const app = express();
 const port = 3000;
 
 app.use(cors({ origin: '*' })); // Allow all origins for testing
 app.use(express.json());
+
+
+// Storage configuration
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, path.join(__dirname, 'uploads/profile-photos'));
+  },
+  filename: function (req, file, cb) {
+    // Save with user id and timestamp to avoid conflicts
+    const ext = path.extname(file.originalname);
+    cb(null, 'user_' + req.user.UserID + '_' + Date.now() + ext);
+  }
+});
+
+const upload = multer({ storage });
+
+
 
 // JWT Middleware
 const authenticateToken = (req, res, next) => {
@@ -116,47 +135,113 @@ app.get('/users', async (req, res) => {
 });
 
 // Protected route: Fetch user-specific data
+// app.get('/user-data', authenticateToken, async (req, res) => {
+//   try {
+//     const userId = req.user.UserID; // From decoded JWT
+//     console.log('Fetching data for UserID:', userId);
+//     const [rows] = await pool.query('SELECT FullName, Email, Phone, Department FROM Users WHERE UserID = ?', [userId]);
+//     if (rows.length === 0) {
+//       return res.status(404).json({ error: 'User not found' });
+//     }
+//     res.json({
+//       someData: `Data for user ${rows[0].FullName}`,
+//       user: rows[0],
+//     });
+//   } catch (err) {
+//     console.error('User data error:', err);
+//     res.status(500).json({ error: 'Server error' });
+//   }
+// });
+
 app.get('/user-data', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.UserID; // From decoded JWT
-    console.log('Fetching data for UserID:', userId);
-    const [rows] = await pool.query('SELECT FullName, Email, Phone, Department FROM Users WHERE UserID = ?', [userId]);
+    const userId = req.user.UserID;
+    const [rows] = await pool.query(
+      'SELECT FullName, Email, Phone, Department, ProfilePhoto FROM Users WHERE UserID = ?',
+      [userId]
+    );
     if (rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
-    res.json({
-      someData: `Data for user ${rows[0].FullName}`,
-      user: rows[0],
-    });
+    res.json({ user: rows[0] });
   } catch (err) {
     console.error('User data error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
+
+
 // Update user profile
-app.put('/update-profile', authenticateToken, async (req, res) => {
+// app.put('/update-profile', authenticateToken, async (req, res) => {
+//   try {
+//     console.log('Received body:', req.body);
+//     const userId = req.user.UserID;
+//     const { FullName, Email, Phone, Department } = req.body;
+//     if (!FullName || !Email) {
+//       return res.status(400).json({ error: 'FullName and Email are required' });
+//     }
+//     const [existing] = await pool.query('SELECT Email FROM Users WHERE Email = ? AND UserID != ?', [Email, userId]);
+//     if (existing.length > 0) {
+//       return res.status(400).json({ error: 'Email already registered by another user' });
+//     }
+//     await pool.query(
+//       'UPDATE Users SET FullName = ?, Email = ?, Phone = ?, Department = ? WHERE UserID = ?',
+//       [FullName, Email, Phone || null, Department || null, userId]
+//     );
+//     res.json({ message: 'Profile updated successfully' });
+//   } catch (err) {
+//     console.error('Update profile error:', err);
+//     res.status(500).json({ error: 'Server error' });
+//   }
+// });
+
+app.put('/update-profile', authenticateToken, upload.single('profilePhoto'), async (req, res) => {
   try {
-    console.log('Received body:', req.body);
     const userId = req.user.UserID;
     const { FullName, Email, Phone, Department } = req.body;
+    let profilePhotoPath = null;
+
     if (!FullName || !Email) {
       return res.status(400).json({ error: 'FullName and Email are required' });
     }
-    const [existing] = await pool.query('SELECT Email FROM Users WHERE Email = ? AND UserID != ?', [Email, userId]);
+
+    // If file uploaded, store path relative to public dir (e.g., 'uploads/profile-photos/filename.jpg')
+    if (req.file) {
+      profilePhotoPath = `uploads/profile-photos/${req.file.filename}`;
+    }
+
+    // Check for existing email
+    const [existing] = await pool.query(
+      'SELECT Email FROM Users WHERE Email = ? AND UserID != ?',
+      [Email, userId]
+    );
     if (existing.length > 0) {
       return res.status(400).json({ error: 'Email already registered by another user' });
     }
-    await pool.query(
-      'UPDATE Users SET FullName = ?, Email = ?, Phone = ?, Department = ? WHERE UserID = ?',
-      [FullName, Email, Phone || null, Department || null, userId]
-    );
-    res.json({ message: 'Profile updated successfully' });
+
+    // Update with photo if present
+    if (profilePhotoPath) {
+      await pool.query(
+        'UPDATE Users SET FullName = ?, Email = ?, Phone = ?, Department = ?, ProfilePhoto = ? WHERE UserID = ?',
+        [FullName, Email, Phone || null, Department || null, profilePhotoPath, userId]
+      );
+    } else {
+      await pool.query(
+        'UPDATE Users SET FullName = ?, Email = ?, Phone = ?, Department = ? WHERE UserID = ?',
+        [FullName, Email, Phone || null, Department || null, userId]
+      );
+    }
+
+    res.json({ message: 'Profile updated successfully', profilePhoto: profilePhotoPath });
   } catch (err) {
     console.error('Update profile error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+
+
 
 app.get('/rooms', async (req, res) => {
   try {
@@ -337,147 +422,6 @@ app.delete('/bookings/:id', authenticateToken, async (req, res) => {
   }
 });
 
-
-// app.put('/bookings/:id', authenticateToken, async (req, res) => {
-//   try {
-//     console.log('Received body:', req.body);
-//     const userId = req.user.UserID;
-//     const bookingId = req.params.id;
-//     const { roomId, slotId, date, reason, department } = req.body;
-
-//     if (!roomId || !slotId || !date || !reason || !department) {
-//       return res.status(400).json({ error: 'roomId, slotId, date, reason, and department are required' });
-//     }
-
-//     // Verify booking exists and belongs to user
-//     const [bookings] = await pool.query(
-//       'SELECT * FROM Bookings WHERE BookingID = ? AND UserID = ? AND Status != "Cancelled"',
-//       [bookingId, userId]
-//     );
-//     if (bookings.length === 0) {
-//       return res.status(403).json({ error: 'Booking not found or not authorized' });
-//     }
-
-//     // Check if new slot is available (exclude current booking)
-//     const [existing] = await pool.query(
-//       'SELECT BookingID FROM Bookings WHERE RoomID = ? AND SlotID = ? AND BookingDate = ? AND Status != "Cancelled" AND BookingID != ?',
-//       [roomId, slotId, date, bookingId]
-//     );
-//     if (existing.length > 0) {
-//       return res.status(409).json({ error: 'This slot is already booked' });
-//     }
-
-//     // Update booking
-//     const [result] = await pool.query(
-//       'UPDATE Bookings SET RoomID = ?, SlotID = ?, BookingDate = ?, Reason = ?, Department = ?, Status = ? WHERE BookingID = ? AND UserID = ?',
-//       [roomId, slotId, date, reason, department, 'Confirmed', bookingId, userId]
-//     );
-
-//     if (result.affectedRows === 0) {
-//       return res.status(404).json({ error: 'Booking not found or not authorized' });
-//     }
-
-//     // Fetch details for notification
-//     const [room] = await pool.query('SELECT Name FROM Rooms WHERE RoomID = ?', [roomId]);
-//     const [slot] = await pool.query('SELECT Display FROM TimeSlots WHERE SlotID = ?', [slotId]);
-//     const [user] = await pool.query('SELECT FullName FROM Users WHERE UserID = ?', [userId]);
-//     if (!room.length || !slot.length || !user.length) {
-//       return res.status(404).json({ error: 'Room, slot, or user not found' });
-//     }
-
-//     // Create notification
-//     const message = `${user[0].FullName} updated a booking for ${room[0].Name} at ${slot[0].Display} on ${date}.`;
-//     console.log('Attempting to create notification:', { userId, message });
-//     await createNotification(userId, null, 'BOOKING_UPDATED', message);
-
-//     res.status(200).json({ message: 'Booking updated successfully' });
-//   } catch (err) {
-//     console.error('Update booking error:', err);
-//     if (err.code === 'ER_DUP_ENTRY') {
-//       return res.status(409).json({ error: 'This slot is already booked' });
-//     }
-//     res.status(500).json({ error: 'Server error' });
-//   }
-// });
-
-// app.put('/bookings/:id', authenticateToken, async (req, res) => {
-//   try {
-//     console.log('Received body:', req.body);
-//     const userId = req.user.UserID;
-//     const bookingId = req.params.id;
-//     const { roomId, slotId, date, reason, department } = req.body;
-
-//     if (!roomId || !slotId || !date || !reason || !department) {
-//       return res.status(400).json({ error: 'roomId, slotId, date, reason, and department are required' });
-//     }
-
-//     // Validate roomId and slotId
-//     const parsedRoomId = parseInt(roomId, 10);
-//     const parsedSlotId = parseInt(slotId, 10);
-//     if (isNaN(parsedRoomId) || isNaN(parsedSlotId)) {
-//       return res.status(400).json({ error: 'roomId and slotId must be valid integers' });
-//     }
-
-//     const [room] = await pool.query('SELECT Name FROM Rooms WHERE RoomID = ?', [parsedRoomId]);
-//     const [slot] = await pool.query('SELECT Display FROM TimeSlots WHERE SlotID = ?', [parsedSlotId]);
-//     if (!room.length) {
-//       return res.status(400).json({ error: 'Invalid roomId: Room does not exist' });
-//     }
-//     if (!slot.length) {
-//       return res.status(400).json({ error: 'Invalid slotId: Time slot does not exist' });
-//     }
-
-//     // Verify booking exists and belongs to user
-//     const [bookings] = await pool.query(
-//       'SELECT * FROM Bookings WHERE BookingID = ? AND UserID = ? AND Status != "Cancelled"',
-//       [bookingId, userId]
-//     );
-//     if (bookings.length === 0) {
-//       return res.status(403).json({ error: 'Booking not found or not authorized' });
-//     }
-
-//     // Check if new slot is available (exclude current booking)
-//     const [existing] = await pool.query(
-//       'SELECT BookingID FROM Bookings WHERE RoomID = ? AND SlotID = ? AND BookingDate = ? AND Status != "Cancelled" AND BookingID != ?',
-//       [parsedRoomId, parsedSlotId, date, bookingId]
-//     );
-//     if (existing.length > 0) {
-//       return res.status(409).json({ error: 'This slot is already booked' });
-//     }
-
-//     // Update booking
-//     const [result] = await pool.query(
-//       'UPDATE Bookings SET RoomID = ?, SlotID = ?, BookingDate = ?, Reason = ?, Department = ?, Status = ? WHERE BookingID = ? AND UserID = ?',
-//       [parsedRoomId, parsedSlotId, date, reason, department, 'Confirmed', bookingId, userId]
-//     );
-
-//     if (result.affectedRows === 0) {
-//       return res.status(404).json({ error: 'Booking not found or not authorized' });
-//     }
-
-//     // Fetch user for notification
-//     const [user] = await pool.query('SELECT FullName FROM Users WHERE UserID = ?', [userId]);
-//     if (!user.length) {
-//       return res.status(404).json({ error: 'User not found' });
-//     }
-
-//     // Create notification
-//     const message = `${user[0].FullName} updated a booking for ${room[0].Name} at ${slot[0].Display} on ${date}.`;
-//     console.log('Attempting to create notification:', { userId, message });
-//     await createNotification(userId, null, 'BOOKING_UPDATED', message);
-
-//     res.status(200).json({ message: 'Booking updated successfully' });
-//   } catch (err) {
-//     console.error('Update booking error:', err);
-//     if (err.code === 'ER_NO_REFERENCED_ROW_2') {
-//       return res.status(400).json({ error: 'Invalid roomId or slotId: Referenced room or slot does not exist' });
-//     }
-//     if (err.code === 'ER_DUP_ENTRY') {
-//       return res.status(409).json({ error: 'This slot is already booked' });
-//     }
-//     res.status(500).json({ error: 'Server error' });
-//   }
-// });
 
 
 
