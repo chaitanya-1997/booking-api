@@ -793,6 +793,69 @@ app.put('/notifications/:id/read', authenticateToken, async (req, res) => {
   }
 });
 
+
+
+app.put("/api/password", authenticateToken, async (req, res) => {
+  const { currentPassword, newPassword, confirmPassword } = req.body;
+  const userId = req.user.UserID;
+  try {
+    // Validate input
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      return res
+        .status(400)
+        .json({ error: "All password fields are required" });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ error: "New passwords do not match" });
+    }
+
+    // Password validation regex
+    const passwordRegex =
+      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]).{8,}$/;
+    if (!passwordRegex.test(newPassword) || /\s/.test(newPassword)) {
+      return res.status(400).json({
+        error:
+          "Password must be at least 8 characters, include one uppercase, one lowercase, one number, one special character, and no spaces",
+      });
+    }
+
+    // Fetch user
+    const [users] = await pool.query(
+      "SELECT PasswordHash, Email, FullName FROM Users WHERE UserID = ?",
+      [userId]
+    );
+    if (users.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    const user = users[0];
+
+    // Verify current password
+    const isMatch = await bcrypt.compare(currentPassword, user.PasswordHash);
+    if (!isMatch) {
+      return res.status(401).json({ error: "Current password is incorrect" });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    // Update password
+    await pool.query(
+      "UPDATE Users SET PasswordHash = ? WHERE UserID = ?",
+      [hashedPassword, userId]
+    );
+
+    res.json({ message: "Password updated successfully" });
+  } catch (err) {
+    console.error("Error updating password:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+
+
+
 // Cron job for meeting reminders
 cron.schedule('* * * * *', async () => {
   try {
