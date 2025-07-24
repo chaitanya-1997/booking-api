@@ -51,6 +51,28 @@ const authenticateToken = (req, res, next) => {
   }
 };
 
+
+const authenticateAdmin = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    req.admin = decoded;
+    next();
+  } catch (err) {
+    return res.status(403).json({ error: 'Invalid or expired token' });
+  }
+};
+
+
+
 // Create Notification Function
 const createNotification = async (userId, recipientId, type, message) => {
   try {
@@ -854,6 +876,758 @@ app.put("/api/password", authenticateToken, async (req, res) => {
 
 
 
+app.post('/admin/signup', async (req, res) => {
+  try {
+    const { fullname, email, password, phone, department, profile_photo } = req.body;
+
+    if (!fullname || !email || !password || !department || !phone) {
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+
+    // Check if email already exists in admin table
+    const [existing] = await pool.query('SELECT email FROM admin WHERE email = ?', [email]);
+    if (existing.length > 0) {
+      return res.status(400).json({ error: 'Email already registered' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    await pool.query(
+      'INSERT INTO admin (fullname, email, password, phone, department, profile_photo, role) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [fullname, email, passwordHash, phone, department, profile_photo || null, 'admin']
+    );
+
+    res.status(201).json({ message: 'Admin registered successfully' });
+  } catch (err) {
+    console.error('Admin Sign-up error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+// Admin Login API
+app.post('/admin/login', async (req, res) => {
+  try {
+    console.log('Received body:', req.body);
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and Password are required' });
+    }
+
+    // Query active admin by email
+    const [admins] = await pool.query(
+      'SELECT * FROM admin WHERE email = ? AND isactive = 1',
+      [email]
+    );
+
+    if (admins.length === 0) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const admin = admins[0];
+
+    // Compare password hashes
+    const isMatch = await bcrypt.compare(password, admin.password);
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Create JWT token with admin info
+    const token = jwt.sign(
+      { adminid: admin.adminid, email: admin.email, role: admin.role },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '1h' }
+    );
+
+    res.json({
+      message: 'Login successful',
+      token,
+      admin: {
+        adminid: admin.adminid,
+        fullname: admin.fullname,
+        email: admin.email,
+        role: admin.role,
+        phone: admin.phone,
+        department: admin.department,
+        profile_photo: admin.profile_photo || null,
+      },
+    });
+  } catch (err) {
+    console.error('Admin login error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+// Assuming you already have express, jwt, bcrypt, mysql2/promise pool and authenticateAdmin middleware set up
+
+app.get('/admin/profile', authenticateAdmin, async (req, res) => {
+  try {
+    // `authenticateAdmin` middleware sets decoded token data in req.admin
+    const adminId = req.admin.adminid;
+
+    // Query admin details by adminid
+    const [rows] = await pool.query(
+      'SELECT adminid, fullname, email, role, phone, department, profile_photo, isactive, created_at FROM admin WHERE adminid = ?',
+      [adminId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Admin not found' });
+    }
+
+    const admin = rows[0];
+
+    // Return full admin profile data
+    res.json({ admin });
+  } catch (error) {
+    console.error('Error fetching admin profile:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+app.put('/admin/password', authenticateAdmin, async (req, res) => {
+  const { currentPassword, newPassword, confirmPassword } = req.body;
+  const adminId = req.admin.adminid;
+
+  try {
+    // Validate request body
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      return res.status(400).json({ error: 'All password fields are required' });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ error: 'New passwords do not match' });
+    }
+
+    // Password complexity regex:
+    const passwordRegex =
+      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]).{8,}$/;
+
+    if (!passwordRegex.test(newPassword) || /\s/.test(newPassword)) {
+      return res.status(400).json({
+        error:
+          'Password must be at least 8 characters, include one uppercase, one lowercase, one number, one special character, and no spaces',
+      });
+    }
+
+    // Fetch admin's current password hash
+    const [admins] = await pool.query(
+      'SELECT password, email, fullname FROM admin WHERE adminid = ?',
+      [adminId]
+    );
+
+    if (admins.length === 0) {
+      return res.status(404).json({ error: 'Admin not found' });
+    }
+
+    const admin = admins[0];
+
+    // Verify current password
+    const isMatch = await bcrypt.compare(currentPassword, admin.password);
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    // Update password in database
+    await pool.query(
+      'UPDATE admin SET password = ? WHERE adminid = ?',
+      [hashedPassword, adminId]
+    );
+
+    return res.json({ message: 'Password updated successfully' });
+  } catch (err) {
+    console.error('Error updating admin password:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/admin/profile', authenticateAdmin, async (req, res) => {
+  try {
+    const adminId = req.admin.adminid;
+    const { fullname, email, phone, department } = req.body;
+
+    // Basic validation
+    if (!fullname || !email || !phone || !department) {
+      return res.status(400).json({ error: 'All fields (fullname, email, phone, department) are required.' });
+    }
+
+    // Check if email is already used by another admin
+    const [existingEmails] = await pool.query(
+      'SELECT adminid FROM admin WHERE email = ? AND adminid != ?',
+      [email, adminId]
+    );
+
+    if (existingEmails.length > 0) {
+      return res.status(400).json({ error: 'Email is already in use by another account.' });
+    }
+
+    // Update the admin profile
+    await pool.query(
+      `UPDATE admin 
+       SET fullname = ?, email = ?, phone = ?, department = ? 
+       WHERE adminid = ?`,
+      [fullname, email, phone, department, adminId]
+    );
+
+    // Fetch the updated data to send back
+    const [updated] = await pool.query(
+      `SELECT adminid, fullname, email, role, phone, department, profile_photo, isactive, created_at
+      FROM admin WHERE adminid = ?`,
+      [adminId]
+    );
+
+    if (updated.length === 0) {
+      return res.status(404).json({ error: 'Admin not found after update' });
+    }
+
+    return res.json({ message: 'Profile updated successfully', admin: updated[0] });
+  } catch (error) {
+    console.error('Error updating admin profile:', error);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+app.post('/admin/rooms', authenticateAdmin, async (req, res) => {
+  try {
+    const { name, description, maxCapacity, features, imageUrl } = req.body;
+    if (!name || !maxCapacity) {
+      return res.status(400).json({ error: 'Name and maxCapacity are required' });
+    }
+    const [result] = await pool.query(
+      `INSERT INTO Rooms (Name, Capacity, Description, Products, ImageUrl, IsActive) VALUES (?, ?, ?, ?, ?, 1)`,
+      [name, maxCapacity, description || null, features || null, imageUrl || null]
+    );
+
+    res.status(201).json({ message: 'Room added', roomId: result.insertId });
+  } catch (error) {
+    console.error('Error adding room:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/admin/rooms', authenticateAdmin, async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM Rooms');
+    res.json({ rooms: rows });
+  } catch (error) {
+    console.error('Error fetching rooms:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/admin/rooms/:id', authenticateAdmin, async (req, res) => {
+  try {
+    const roomId = req.params.id;
+    const { name, description, maxCapacity, features, imageUrl, isActive } = req.body;
+    const [result] = await pool.query(
+      `UPDATE Rooms SET Name = ?, Capacity = ?, Description = ?, Products = ?, ImageUrl = ?, IsActive = ? WHERE RoomID = ?`,
+      [name, maxCapacity, description, features, imageUrl, isActive, roomId]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    res.json({ message: 'Room updated' });
+  } catch (error) {
+    console.error('Error updating room:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/admin/rooms/:id', authenticateAdmin, async (req, res) => {
+  try {
+    const roomId = req.params.id;
+    const [result] = await pool.query(`DELETE FROM Rooms WHERE RoomID = ?`, [roomId]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    res.json({ message: 'Room deleted' });
+  } catch (error) {
+    console.error('Error deleting room:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.patch('/admin/rooms/:id/status', authenticateAdmin, async (req, res) => {
+  try {
+    const roomId = req.params.id;
+    const { isActive } = req.body; // boolean
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ error: 'isActive must be boolean' });
+    }
+    const [result] = await pool.query(`UPDATE Rooms SET IsActive = ? WHERE RoomID = ?`, [
+      isActive ? 1 : 0,
+      roomId,
+    ]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    res.json({ message: `Room ${isActive ? 'activated' : 'deactivated'}` });
+  } catch (error) {
+    console.error('Error toggling room status:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+app.get('/admin/users', authenticateAdmin, async (req, res) => {
+  try {
+    const [users] = await pool.query(`
+      SELECT UserID, FullName, Email, Role, Department, Phone, IsActive, CreatedAt
+      FROM Users
+      ORDER BY CreatedAt DESC
+    `);
+    res.json({ users });
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+app.delete('/admin/users/:id', authenticateAdmin, async (req, res) => {
+  const userId = req.params.id;
+
+  try {
+    const [result] = await pool.query('DELETE FROM Users WHERE UserID = ?', [userId]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.patch('/admin/users/:id/status', authenticateAdmin, async (req, res) => {
+  const userId = req.params.id;
+  const { isActive } = req.body; // Boolean expected
+
+  if (typeof isActive !== 'boolean') {
+    return res.status(400).json({ error: 'isActive must be boolean' });
+  }
+
+  try {
+    const [result] = await pool.query('UPDATE Users SET IsActive = ? WHERE UserID = ?', [
+      isActive ? 1 : 0,
+      userId,
+    ]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({ message: `User ${isActive ? 'activated' : 'deactivated'}` });
+  } catch (error) {
+    console.error('Error toggling user status:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/admin/bookings', authenticateAdmin, async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        b.BookingID, b.BookingDate, b.SlotID, b.Reason, b.Department,
+        b.Status,
+        u.UserID, u.FullName AS UserName,
+        r.RoomID, r.Name AS RoomName,
+        s.StartTime, s.EndTime
+      FROM Bookings b
+      JOIN Users u ON b.UserID = u.UserID
+      JOIN Rooms r ON b.RoomID = r.RoomID
+      JOIN Slots s ON b.SlotID = s.SlotID
+      ORDER BY b.BookingDate DESC, s.StartTime DESC
+      LIMIT 100
+    `;
+
+    const [rows] = await pool.query(query);
+
+    res.json({ bookings: rows });
+  } catch (error) {
+    console.error('Error fetching bookings:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/bookings/all', authenticateAdmin, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT 
+         b.BookingID AS id, 
+         u.FullName AS name,
+         COALESCE(r.Name, 'Unknown Room') AS room, 
+         b.BookingDate AS date, 
+         t.Display AS time, 
+         b.Reason AS reason, 
+         b.Status AS status, 
+         b.Department AS department, 
+         r.Products AS products
+       FROM Bookings b
+       JOIN Rooms r ON b.RoomID = r.RoomID
+       JOIN TimeSlots t ON b.SlotID = t.SlotID
+       JOIN Users u ON b.UserID = u.UserID
+       ORDER BY b.BookingDate DESC, t.StartTime ASC
+      `
+    );
+
+    const bookings = rows.map(row => ({
+      ...row,
+      products: row.products ? row.products.split(',') : [],
+    }));
+
+    res.json(bookings);
+  } catch (err) {
+    console.error('Bookings error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+app.put('/admin/bookings/:bookingId/cancel', authenticateAdmin, async (req, res) => {
+  const bookingId = req.params.bookingId;
+
+  try {
+    // Check if booking exists and is not already cancelled or completed
+    const [bookingRows] = await pool.query(
+      'SELECT Status FROM Bookings WHERE BookingID = ?',
+      [bookingId]
+    );
+
+    if (bookingRows.length === 0) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    const booking = bookingRows[0];
+    if (booking.Status === 'Cancelled' || booking.Status === 'Completed') {
+      return res.status(400).json({ error: `Booking already ${booking.Status.toLowerCase()}` });
+    }
+
+    // Update status to Cancelled
+    await pool.query(
+      'UPDATE Bookings SET Status = ? WHERE BookingID = ?',
+      ['Cancelled', bookingId]
+    );
+
+    res.json({ message: 'Booking cancelled successfully' });
+  } catch (error) {
+    console.error('Error cancelling booking:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+app.get('/bookings/counts', authenticateAdmin, async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    // Get current date for frontend display (YYYY-MM-DD)
+    const today = new Date().toISOString().split('T')[0];
+
+    // Query for total bookings count
+    const [totalBookingsResult] = await connection.query(
+      `SELECT COUNT(*) AS totalBookings FROM Bookings`
+    );
+
+    // Query for today's bookings count
+    const [todayBookingsResult] = await connection.query(
+      `SELECT COUNT(*) AS todayBookings FROM Bookings WHERE BookingDate = CURRENT_DATE`
+    );
+
+    // Query for total active users count
+    const [totalUsersResult] = await connection.query(
+      `SELECT COUNT(*) AS totalUsers FROM Users WHERE IsActive = 1`
+    );
+
+    // Query for total active rooms count
+    const [totalRoomsResult] = await connection.query(
+      `SELECT COUNT(*) AS totalRooms FROM Rooms WHERE IsActive = 1`
+    );
+
+    res.status(200).json({
+      totalBookings: totalBookingsResult[0].totalBookings,
+      todayBookings: todayBookingsResult[0].todayBookings,
+      todayDate: today,
+      totalUsers: totalUsersResult[0].totalUsers,
+      totalRooms: totalRoomsResult[0].totalRooms
+    });
+  } catch (error) {
+    console.error('Error fetching counts:', error);
+    if (error.code === 'ER_NO_SUCH_TABLE') {
+      res.status(500).json({ error: `Database table not found: ${error.sqlMessage}` });
+    } else if (error.code === 'ER_ACCESS_DENIED_ERROR') {
+      res.status(500).json({ error: 'Database access denied' });
+    } else if (error.code === 'ER_BAD_FIELD_ERROR') {
+      res.status(500).json({ error: `Invalid column name: ${error.sqlMessage}` });
+    } else {
+      res.status(500).json({ error: 'Failed to fetch counts' });
+    }
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// GET /admin/bookings/weekly - Fetch day-wise booking counts for the past 7 days
+app.get('/bookings/weekly', authenticateAdmin, async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    // Get current date in IST
+    const today = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+    const todayDate = new Date(today);
+
+    // Get Monday (start of week) and Sunday (end of week)
+    const day = todayDate.getDay(); // 0 (Sun) to 6 (Sat)
+    const diffToMonday = (day + 6) % 7; // Days to subtract to get to Monday
+    const startOfWeek = new Date(todayDate);
+    startOfWeek.setDate(todayDate.getDate() - diffToMonday);
+    startOfWeek.setHours(0, 0, 0, 0);
+
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 6);
+    endOfWeek.setHours(23, 59, 59, 999);
+
+    const startDateStr = startOfWeek.toISOString().split('T')[0];
+    const endDateStr = endOfWeek.toISOString().split('T')[0];
+
+    // MySQL query using IST time zone conversion
+    const [results] = await connection.query(
+      `SELECT 
+         DATE(CONVERT_TZ(BookingDate, @@session.time_zone, '+05:30')) AS date, 
+         COUNT(*) AS count 
+       FROM Bookings 
+       WHERE DATE(CONVERT_TZ(BookingDate, @@session.time_zone, '+05:30')) BETWEEN ? AND ?
+       GROUP BY date
+       ORDER BY date ASC`,
+      [startDateStr, endDateStr]
+    );
+
+    // Create labels from Monday to Sunday
+    const labels = [];
+    const data = [];
+
+    for (let i = 0; i < 7; i++) {
+      const date = new Date(startOfWeek);
+      date.setDate(startOfWeek.getDate() + i);
+      const label = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); // "Jul 22"
+      const isoDate = date.toISOString().split('T')[0]; // "2025-07-22"
+
+      labels.push(label);
+      const result = results.find(r => r.date.toISOString().split('T')[0] === isoDate);
+      data.push(result ? result.count : 0);
+    }
+
+    res.status(200).json({ labels, data });
+  } catch (error) {
+    console.error('Error fetching weekly bookings:', error);
+    res.status(500).json({ error: 'Failed to fetch weekly bookings' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+
+// GET /admin/bookings/room-usage - Fetch booking counts per room
+app.get('/bookings/room-usage', authenticateAdmin, async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    // Query for booking counts for Samvad (RoomID: 1) and Arohan (RoomID: 2)
+    const [results] = await connection.query(
+      `SELECT 
+         r.Name AS roomName, 
+         COUNT(b.BookingID) AS count 
+       FROM Rooms r 
+       LEFT JOIN Bookings b ON r.RoomID = b.RoomID 
+       WHERE r.RoomID IN (1, 2) AND r.IsActive = 1 
+       GROUP BY r.RoomID, r.Name`
+    );
+
+    // Format response
+    const labels = results.map(r => r.roomName);
+    const data = results.map(r => Math.min(r.count, 100)); // Cap at 100 for y-axis
+
+    res.status(200).json({ labels, data });
+  } catch (error) {
+    console.error('Error fetching room usage:', error);
+    if (error.code === 'ER_NO_SUCH_TABLE') {
+      res.status(500).json({ error: `Database table not found: ${error.sqlMessage}` });
+    } else if (error.code === 'ER_ACCESS_DENIED_ERROR') {
+      res.status(500).json({ error: 'Database access denied' });
+    } else if (error.code === 'ER_BAD_FIELD_ERROR') {
+      res.status(500).json({ error: `Invalid column name: ${error.sqlMessage}` });
+    } else {
+      res.status(500).json({ error: 'Failed to fetch room usage' });
+    }
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+
+
+app.get('/mybookings/counts', authenticateAdmin, async (req, res) => {
+  const { period = 'all' } = req.query;
+  let connection;
+
+  try {
+    connection = await pool.getConnection();
+
+    // Get date filter based on period
+    const now = new Date();
+    let startDate = null;
+    if (period === 'week') {
+      const day = now.getDay();
+      const diffToMonday = (day + 6) % 7;
+      now.setDate(now.getDate() - diffToMonday);
+      startDate = now.toISOString().split('T')[0];
+    } else if (period === 'month') {
+      now.setDate(now.getDate() - 30);
+      startDate = now.toISOString().split('T')[0];
+    }
+
+    const dateFilter = startDate ? `WHERE BookingDate >= '${startDate}'` : '';
+
+    // Bookings Count
+    const [[{ totalBookings }]] = await connection.query(
+      `SELECT COUNT(*) AS totalBookings FROM Bookings ${dateFilter}`
+    );
+    const [[{ cancelledBookings }]] = await connection.query(
+      `SELECT COUNT(*) AS cancelledBookings FROM Bookings 
+       WHERE Status = 'Cancelled' ${startDate ? `AND BookingDate >= '${startDate}'` : ''}`
+    );
+
+    // Users Count (no filter needed)
+    const [[{ totalUsers }]] = await connection.query(`SELECT COUNT(*) AS totalUsers FROM Users`);
+    const [[{ totalRooms }]] = await connection.query(`SELECT COUNT(*) AS totalRooms FROM Rooms`);
+
+    res.json({ totalBookings, cancelledBookings, totalUsers, totalRooms });
+  } catch (err) {
+    console.error('Counts API Error:', err);
+    res.status(500).json({ error: 'Failed to fetch counts' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+app.get('/mybookings/room-usage', authenticateAdmin, async (req, res) => {
+  const { period = 'all' } = req.query;
+  let connection;
+
+  try {
+    connection = await pool.getConnection();
+
+    let dateCondition = '';
+    if (period !== 'all') {
+      const now = new Date();
+      now.setDate(now.getDate() - (period === 'week' ? 7 : 30));
+      const dateStr = now.toISOString().split('T')[0];
+      dateCondition = `AND BookingDate >= '${dateStr}'`;
+    }
+
+    const [results] = await connection.query(`
+      SELECT r.Name AS room, COUNT(b.BookingID) AS bookings
+      FROM Rooms r
+      LEFT JOIN Bookings b ON r.RoomID = b.RoomID AND b.Status = 'Approved' ${dateCondition}
+      GROUP BY r.RoomID
+      ORDER BY bookings DESC
+    `);
+
+    res.json({ labels: results.map(r => r.room), data: results.map(r => r.bookings) });
+  } catch (err) {
+    console.error('Room Usage Error:', err);
+    res.status(500).json({ error: 'Failed to fetch room usage' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+app.get('/bookings/peak-hours', authenticateAdmin, async (req, res) => {
+  const { period = 'all' } = req.query;
+  let connection;
+
+  try {
+    connection = await pool.getConnection();
+
+    let dateCondition = '';
+    if (period !== 'all') {
+      const now = new Date();
+      now.setDate(now.getDate() - (period === 'week' ? 7 : 30));
+      const dateStr = now.toISOString().split('T')[0];
+      dateCondition = `AND BookingDate >= '${dateStr}'`;
+    }
+
+    const [rows] = await connection.query(`
+      SELECT HOUR(CreatedAt) AS hour, COUNT(*) AS count
+      FROM Bookings
+      WHERE Status = 'Approved' ${dateCondition}
+      GROUP BY hour
+      ORDER BY hour
+    `);
+
+    const hours = Array(24).fill(0);
+    rows.forEach(r => {
+      hours[r.hour] = r.count;
+    });
+
+    res.json({
+      labels: Array.from({ length: 9 }, (_, i) => `${9 + i}AM`),
+      data: hours.slice(9, 18)
+    });
+  } catch (err) {
+    console.error('Peak Hours Error:', err);
+    res.status(500).json({ error: 'Failed to fetch peak hours' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+
+app.get('/bookings/top-users', authenticateAdmin, async (req, res) => {
+  const { period = 'all' } = req.query;
+  let connection;
+
+  try {
+    connection = await pool.getConnection();
+
+    let dateCondition = '';
+    if (period !== 'all') {
+      const now = new Date();
+      now.setDate(now.getDate() - (period === 'week' ? 7 : 30));
+      const dateStr = now.toISOString().split('T')[0];
+      dateCondition = `AND BookingDate >= '${dateStr}'`;
+    }
+
+    const [rows] = await connection.query(`
+      SELECT u.FullName AS name, COUNT(b.BookingID) AS bookings
+      FROM Users u
+      JOIN Bookings b ON u.UserID = b.UserID
+      WHERE b.Status = 'Approved' ${dateCondition}
+      GROUP BY u.UserID
+      ORDER BY bookings DESC
+      LIMIT 5
+    `);
+
+    res.json({
+      labels: rows.map(r => r.name.split(' ')[0]),
+      data: rows.map(r => r.bookings)
+    });
+  } catch (err) {
+    console.error('Top Users Error:', err);
+    res.status(500).json({ error: 'Failed to fetch top users' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 
 
 // Cron job for meeting reminders
@@ -881,6 +1655,8 @@ cron.schedule('* * * * *', async () => {
     console.error('Error in cron job:', err);
   }
 });
+
+
 
 app.listen(port, '0.0.0.0', () => {
   console.log(`Server running on http://0.0.0.0:${port}`);
