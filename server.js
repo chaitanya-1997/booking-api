@@ -71,9 +71,27 @@ const authenticateAdmin = (req, res, next) => {
   }
 };
 
+// Example: Ensure req.admin.role === 'superadmin'
+const authenticateSuperAdmin = (req, res, next) => {
+  try {
+
+    if (req.admin.role !== 'superadmin') {
+      return res.status(403).json({ error: 'Forbidden: Superadmin access required' });
+    }
+    next();
+  } catch (err) {
+    console.error('SuperAdmin auth error:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+};
+
 
 
 // Create Notification Function
+
+
+
+
 const createNotification = async (userId, recipientId, type, message) => {
   try {
     console.log('Creating notification:', { userId, recipientId, type, message });
@@ -318,6 +336,14 @@ app.post('/bookings', authenticateToken, async (req, res) => {
     if (existing.length > 0) {
       return res.status(409).json({ error: 'This slot is already booked' });
     }
+
+     const [adminexisting] = await pool.query(
+      'SELECT BookingID FROM Admin_Booking WHERE RoomID = ? AND SlotID = ? AND BookingDate = ? AND Status != "Cancelled"',
+      [roomId, slotId, date]
+    );
+    if (adminexisting.length > 0) {
+      return res.status(409).json({ error: 'This slot is already booked' });
+    }
     // Verify room, slot, and user exist
     const [room] = await pool.query('SELECT Name FROM Rooms WHERE RoomID = ?', [roomId]);
     const [slot] = await pool.query('SELECT Display FROM TimeSlots WHERE SlotID = ?', [slotId]);
@@ -360,6 +386,15 @@ app.post('/bookingsuser', authenticateToken, async (req, res) => {
     if (existing.length > 0) {
       return res.status(409).json({ error: 'This slot is already booked' });
     }
+
+ const [adminexisting] = await pool.query(
+      'SELECT BookingID FROM Admin_Booking WHERE RoomID = ? AND SlotID = ? AND BookingDate = ? AND Status != "Cancelled"',
+      [roomId, slotId, date]
+    );
+    if (adminexisting.length > 0) {
+      return res.status(409).json({ error: 'This slot is already booked' });
+    }
+
     // Verify room, slot, and user exist
     const [room] = await pool.query('SELECT Name FROM Rooms WHERE RoomID = ?', [roomId]);
     const [slot] = await pool.query('SELECT Display FROM TimeSlots WHERE SlotID = ?', [slotId]);
@@ -906,6 +941,59 @@ app.post('/admin/signup', async (req, res) => {
 
 
 // Admin Login API
+// app.post('/admin/login', async (req, res) => {
+//   try {
+//     console.log('Received body:', req.body);
+//     const { email, password } = req.body;
+
+//     if (!email || !password) {
+//       return res.status(400).json({ error: 'Email and Password are required' });
+//     }
+
+//     // Query active admin by email
+//     const [admins] = await pool.query(
+//       'SELECT * FROM admin WHERE email = ? AND isactive = 1',
+//       [email]
+//     );
+
+//     if (admins.length === 0) {
+//       return res.status(401).json({ error: 'Invalid credentials' });
+//     }
+
+//     const admin = admins[0];
+
+//     // Compare password hashes
+//     const isMatch = await bcrypt.compare(password, admin.password);
+//     if (!isMatch) {
+//       return res.status(401).json({ error: 'Invalid credentials' });
+//     }
+
+//     // Create JWT token with admin info
+//     const token = jwt.sign(
+//       { adminid: admin.adminid, email: admin.email, role: admin.role },
+//       process.env.JWT_SECRET || 'your-secret-key',
+//       { expiresIn: '1h' }
+//     );
+
+//     res.json({
+//       message: 'Login successful',
+//       token,
+//       admin: {
+//         adminid: admin.adminid,
+//         fullname: admin.fullname,
+//         email: admin.email,
+//         role: admin.role,
+//         phone: admin.phone,
+//         department: admin.department,
+//         profile_photo: admin.profile_photo || null,
+//       },
+//     });
+//   } catch (err) {
+//     console.error('Admin login error:', err);
+//     res.status(500).json({ error: 'Server error' });
+//   }
+// });
+
 app.post('/admin/login', async (req, res) => {
   try {
     console.log('Received body:', req.body);
@@ -915,31 +1003,37 @@ app.post('/admin/login', async (req, res) => {
       return res.status(400).json({ error: 'Email and Password are required' });
     }
 
-    // Query active admin by email
-    const [admins] = await pool.query(
-      'SELECT * FROM admin WHERE email = ? AND isactive = 1',
+    // First: Find admin by email regardless of active status
+    const [adminRows] = await pool.query(
+      'SELECT * FROM admin WHERE email = ?',
       [email]
     );
 
-    if (admins.length === 0) {
+    if (adminRows.length === 0) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const admin = admins[0];
+    const admin = adminRows[0];
 
-    // Compare password hashes
+    // Check if admin is active
+    if (admin.isactive !== 1) {
+      return res.status(403).json({ error: 'Your admin account is inactive. Please contact support.' });
+    }
+
+    // Compare password
     const isMatch = await bcrypt.compare(password, admin.password);
     if (!isMatch) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Create JWT token with admin info
+    // Create token
     const token = jwt.sign(
       { adminid: admin.adminid, email: admin.email, role: admin.role },
       process.env.JWT_SECRET || 'your-secret-key',
       { expiresIn: '1h' }
     );
 
+    // Success response
     res.json({
       message: 'Login successful',
       token,
@@ -1629,8 +1723,277 @@ app.get('/bookings/top-users', authenticateAdmin, async (req, res) => {
 });
 
 
+app.post('/admin/bookings', authenticateAdmin, async (req, res) => {
+  try {
+    const { roomId, slotId, date, reason } = req.body;
 
-// Cron job for meeting reminders
+    // Check if req.admin exists
+    if (!req.admin) {
+      return res.status(401).json({ error: 'Authentication failed: No admin data' });
+    }
+
+    const adminId = req.admin.adminid; // Changed from req.adminid to req.admin.adminid
+    if (!adminId) {
+      return res.status(400).json({ error: 'Invalid user data: adminid missing' });
+    }
+
+    if (!roomId || !slotId || !date || !reason) {
+      return res.status(400).json({ error: 'roomId, slotId, date, and reason are required' });
+    }
+
+    // Validate date format (YYYY-MM-DD)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+    }
+
+    const [existing] = await pool.query(
+      'SELECT BookingID FROM Bookings WHERE RoomID = ? AND SlotID = ? AND BookingDate = ? AND Status != "Cancelled"',
+      [roomId, slotId, date]
+    );
+    if (existing.length > 0) {
+      return res.status(409).json({ error: 'This slot is already booked' });
+    }
+    
+
+
+    
+    const [adminexisting] = await pool.query(
+      'SELECT BookingID FROM Admin_Booking WHERE RoomID = ? AND SlotID = ? AND BookingDate = ? AND Status != "Cancelled"',
+      [roomId, slotId, date]
+    );
+    if (adminexisting.length > 0) {
+      return res.status(409).json({ error: 'This slot is already booked' });
+    }
+    const [room] = await pool.query('SELECT Name FROM Rooms WHERE RoomID = ?', [roomId]);
+    const [slot] = await pool.query('SELECT Display FROM TimeSlots WHERE SlotID = ?', [slotId]);
+    if (!room.length || !slot.length) {
+      return res.status(404).json({ error: 'Room or slot not found' });
+    }
+
+    const [admin] = await pool.query('SELECT fullname FROM admin WHERE adminid = ?', [adminId]);
+    if (!admin.length) {
+      return res.status(404).json({ error: 'Admin not found' });
+    }
+
+    await pool.query(
+      'INSERT INTO Admin_Booking (admin_id, RoomID, SlotID, BookingDate, Reason, Status, Department) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [adminId, roomId, slotId, date, reason, 'Confirmed', req.admin.department || 'Admin']
+    );
+
+    
+    res.status(201).json({ message: 'Booking created successfully' });
+  } catch (err) {
+    console.error('Admin booking error:', err);
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'This slot is already booked' });
+    }
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
+app.get('/admin/mybooking', authenticateAdmin, async (req, res) => {
+  try {
+    if (!req.admin) {
+      return res.status(401).json({ error: 'Authentication failed: No admin data' });
+    }
+
+    const adminId = req.admin.adminid;
+    if (!adminId) {
+      return res.status(400).json({ error: 'Invalid user data: adminid missing' });
+    }
+
+    // Get query parameters for filtering
+    const { roomId, date, status, admin_id } = req.query;
+
+    // Build the SQL query dynamically
+    let query = `
+     SELECT 
+  ab.BookingID,
+  ab.admin_id,
+  ab.RoomID,
+  r.Name AS RoomName,
+  ab.SlotID,
+  ts.Display AS SlotDisplay,
+  DATE_FORMAT(ab.BookingDate, '%Y-%m-%d') AS BookingDate,
+  ab.Reason,
+  ab.Department,
+  ab.Status,
+  ab.CreatedAt,
+  a.fullname AS AdminName
+FROM Admin_Booking ab
+
+      JOIN Rooms r ON ab.RoomID = r.RoomID
+      JOIN TimeSlots ts ON ab.SlotID = ts.SlotID
+      JOIN admin a ON ab.admin_id = a.adminid
+    `;
+    const queryParams = [];
+    const conditions = [];
+
+    // Add filters
+    if (roomId) {
+      conditions.push('ab.RoomID = ?');
+      queryParams.push(roomId);
+    }
+    if (date) {
+      // Validate YYYY-MM-DD format
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+      }
+      conditions.push('ab.BookingDate = ?');
+      queryParams.push(date);
+    }
+    if (status) {
+      if (!['Pending', 'Confirmed', 'Cancelled', 'Completed'].includes(status)) {
+        return res.status(400).json({ error: 'Invalid status. Use Pending, Confirmed, Cancelled, or Completed' });
+      }
+      conditions.push('ab.Status = ?');
+      queryParams.push(status);
+    }
+    if (admin_id) {
+      conditions.push('ab.admin_id = ?');
+      queryParams.push(admin_id);
+    } else {
+      conditions.push('ab.admin_id = ?');
+      queryParams.push(adminId);
+    }
+
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    query += ' ORDER BY ab.BookingDate DESC, ab.CreatedAt DESC';
+
+    // Execute the query
+    const [bookings] = await pool.query(query, queryParams);
+
+    // No need to mess with Date objects, already a DATE in DB
+    // Send iso date string as-is
+    res.status(200).json({
+      message: 'Bookings retrieved successfully',
+      bookings: bookings.map(booking => ({
+        bookingId: booking.BookingID,
+        adminId: booking.admin_id,
+        adminName: booking.AdminName,
+        roomId: booking.RoomID,
+        roomName: booking.RoomName,
+        slotId: booking.SlotID,
+        slotDisplay: booking.SlotDisplay,
+        bookingDate: booking.BookingDate, // YYYY-MM-DD, already correct
+        reason: booking.Reason,
+        department: booking.Department,
+        status: booking.Status,
+        createdAt: booking.CreatedAt
+      }))
+    });
+  } catch (err) {
+    console.error('Admin bookings retrieval error:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
+app.get('/bookings/admincounts', authenticateAdmin, async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    // Get current date for frontend display (YYYY-MM-DD)
+    const today = new Date().toISOString().split('T')[0];
+
+    // Query for total bookings count
+    const [totalBookingsResult] = await connection.query(
+      `SELECT COUNT(*) AS totalBookings FROM Admin_Booking`
+    );
+
+    // Query for today's bookings count
+    const [todayBookingsResult] = await connection.query(
+      `SELECT COUNT(*) AS todayBookings FROM Admin_Booking WHERE BookingDate = CURRENT_DATE`
+    );
+
+    // Query for total active users count
+    const [totalUsersResult] = await connection.query(
+      `SELECT COUNT(*) AS totalUsers FROM admin WHERE IsActive = 1`
+    );
+
+    // Query for total active rooms count
+    const [totalRoomsResult] = await connection.query(
+      `SELECT COUNT(*) AS totalRooms FROM Rooms WHERE IsActive = 1`
+    );
+
+    res.status(200).json({
+      totaladminBookings: totalBookingsResult[0].totalBookings,
+      todaysadminBookings: todayBookingsResult[0].todayBookings,
+      todayDate: today,
+      totalAdmins: totalUsersResult[0].totalUsers,
+      totalRooms: totalRoomsResult[0].totalRooms
+    });
+  } catch (error) {
+    console.error('Error fetching counts:', error);
+    if (error.code === 'ER_NO_SUCH_TABLE') {
+      res.status(500).json({ error: `Database table not found: ${error.sqlMessage}` });
+    } else if (error.code === 'ER_ACCESS_DENIED_ERROR') {
+      res.status(500).json({ error: 'Database access denied' });
+    } else if (error.code === 'ER_BAD_FIELD_ERROR') {
+      res.status(500).json({ error: `Invalid column name: ${error.sqlMessage}` });
+    } else {
+      res.status(500).json({ error: 'Failed to fetch counts' });
+    }
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+
+app.get('/admin/all', async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        adminid, fullname, email, phone, department,
+        isactive, created_at
+      FROM admin
+      WHERE role = 'admin'
+      ORDER BY created_at DESC
+    `;
+    const [admins] = await pool.query(query);
+    res.status(200).json({ admins });
+  } catch (err) {
+    console.error('Error fetching all admins:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.patch('/admin/status/:adminid', async (req, res) => {
+  try {
+    const { adminid } = req.params;
+
+    if (!adminid || isNaN(Number(adminid))) {
+      return res.status(400).json({ error: 'Invalid admin ID' });
+    }
+
+    const { isactive } = req.body;
+
+    if (typeof isactive !== 'number' || ![0, 1].includes(isactive)) {
+      return res.status(400).json({ error: 'Invalid isactive value. Must be 0 or 1.' });
+    }
+
+    const query = 'UPDATE admin SET isactive = ? WHERE adminid = ?';
+    const [result] = await pool.query(query, [isactive, adminid]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Admin not found' });
+    }
+
+    res.status(200).json({ success: true, adminid, isactive });
+  } catch (err) {
+    console.error('Update isactive error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
 cron.schedule('* * * * *', async () => {
   try {
     const now = new Date();

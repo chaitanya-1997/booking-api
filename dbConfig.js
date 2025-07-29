@@ -57,6 +57,7 @@ const dbConfig = {
   port: parseInt(process.env.DB_PORT) || 3306,
   connectionLimit: 10,
   debug: true,
+  
 };
 
 const pool = mysql.createPool(dbConfig);
