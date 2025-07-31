@@ -126,7 +126,7 @@ app.post('/login', async (req, res) => {
     const token = jwt.sign(
       { UserID: user.UserID, Email: user.Email, Role: user.Role },
       process.env.JWT_SECRET || 'your-secret-key',
-      { expiresIn: '1h' }
+      { expiresIn: '7d' }
     );
     res.json({
       message: 'Login successful',
@@ -1030,7 +1030,7 @@ app.post('/admin/login', async (req, res) => {
     const token = jwt.sign(
       { adminid: admin.adminid, email: admin.email, role: admin.role },
       process.env.JWT_SECRET || 'your-secret-key',
-      { expiresIn: '1h' }
+      { expiresIn: '7d' }
     );
 
     // Success response
